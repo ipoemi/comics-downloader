@@ -34,7 +34,7 @@ object PageParser extends Parser {
 
     def isValidElem(elem: Element, srcAttrName: String) =
       elem.attrs.keySet.contains(srcAttrName) &&
-        imageExtensions.exists(ext => elem.attrs(srcAttrName).contains("." + ext))
+        imageExtensions.exists(ext => elem.attrs(srcAttrName).toLowerCase.contains("." + ext))
 
     def mkLink(src: String, idx: Int): Link = {
       val ext = src.substring(src.lastIndexOf("."))
