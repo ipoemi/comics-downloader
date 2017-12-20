@@ -1,4 +1,4 @@
-package ipoemi.comicsdownloader.parser.zangsisi
+package ipoemi.comicsdownloader.parser.marumaru
 
 import ipoemi.comicsdownloader.parser.{Link, Parser}
 import net.ruippeixotog.scalascraper.browser.JsoupBrowser
@@ -12,25 +12,10 @@ object PageParser extends Parser {
   def parse(content: String): Seq[Link] = {
     val doc = JsoupBrowser().parseString(content)
 
-    val postOpt = (doc >?> element("#recent-post")).orElse(doc >?> element("#post"))
-
-    val imgTagsOpt = postOpt match {
-      case Some(post) =>
-        for {
-          contents <- post >?> element(".contents")
-          imgTags <- contents >?> elementList("img")
-        } yield imgTags.toVector
-
-      case None =>
-        for {
-          mainOuter <- doc >?> element(".main-outer")
-          contents <- mainOuter >?> element(".post-body")
-          imgTags <- contents >?> elementList("img")
-        } yield imgTags.toVector
-
-    }
-
-    val imgTags = imgTagsOpt.getOrElse(Vector())
+    val imgTags = (for {
+      primary <- doc >?> element(".gallery-template")
+      imgList <- primary >?> elementList("img")
+    } yield imgList).getOrElse(Vector())
 
     def isValidElem(elem: Element, srcAttrName: String) =
       elem.attrs.keySet.contains(srcAttrName) &&
@@ -42,10 +27,10 @@ object PageParser extends Parser {
     }
 
     val links = imgTags.zipWithIndex map { case (elem, i) =>
-      if (isValidElem(elem, "src")) {
-        elem.attrs.get("src").map(mkLink(_, i))
-      } else if (isValidElem(elem, "data-src")) {
+      if (isValidElem(elem, "data-src")) {
         elem.attrs.get("data-src").map(mkLink(_, i))
+      } else if (isValidElem(elem, "src")) {
+        elem.attrs.get("src").map(mkLink(_, i))
       } else None
     }
 

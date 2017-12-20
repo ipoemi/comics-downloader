@@ -1,13 +1,13 @@
 package ipoemi.comicsdownloader.downloader
 
 import java.io.{File => JFile}
-import java.net.{URL, URLEncoder}
+import java.net.{InetSocketAddress, URL, URLEncoder}
 
 import akka.Done
 import akka.actor.ActorSystem
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.model._
-import akka.http.scaladsl.model.headers.RawHeader
+import akka.http.scaladsl.model.headers.{RawHeader, `User-Agent`}
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{Sink, Source}
 import akka.util.ByteString
@@ -17,8 +17,9 @@ import cats._
 import cats.data._
 import cats.implicits._
 import akka.event.Logging
+import akka.http.scaladsl.settings.ClientConnectionSettings
 
-import scala.concurrent.duration.Duration
+import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContextExecutor, Future}
 
 abstract class AkkaHttpDownloader(protected val bookParser: Parser, protected val pageParser: Parser) extends Downloader {
@@ -68,12 +69,13 @@ abstract class AkkaHttpDownloader(protected val bookParser: Parser, protected va
     def downloadBooks(bookLinks: Seq[(Link, URL)]): Future[Seq[String]] = {
       val result = bookLinks map { case (book, fromUrl) =>
         val ret = for {
-          pages <- getPageLinks(book.uri, fromUrl)
+          pages <- getPageLinks(book.uri, new URL(book.uri))
           newPages = pages.map(x => (x._1.copy(name = book.name + "/" + x._1.name), x._2))
+          _ <- Future { actorSystem.log.info(s"${ book.name } Start (${ newPages.size } pages)") }
           _ <- downloadPages(newPages)
-          _ <- zipPages(s"$to/${book.name}", s"$to/${book.name}.zip")
-          _ <- Future {actorSystem.log.info(s"$to/${book.name}.zip Created")}
-          _ <- Future {s"$to/${book.name}".toFile.delete()}
+          _ <- zipPages(s"$to/${ book.name }", s"$to/${ book.name }.zip")
+          _ <- Future { actorSystem.log.info(s"$to/${ book.name }.zip Created") }
+          _ <- Future { s"$to/${ book.name }".toFile.delete() }
         } yield book.name
         Await.result(ret, Duration.Inf)
         ret
@@ -93,7 +95,7 @@ abstract class AkkaHttpDownloader(protected val bookParser: Parser, protected va
           response <- requestUrl(pathToUrl(page.uri, fromUrl))
           filePath = to + "/" + page.name
           ret <- downloadTo(response, filePath)
-          _ <- Future{actorSystem.log.info(s"Download ${page.uri} to $filePath Done")}
+          _ <- Future { actorSystem.log.info(s"Download ${ pathToUrl(page.uri, fromUrl) } to $filePath Done") }
         } yield ret
       }
       result.toVector.sequence_
@@ -132,12 +134,12 @@ abstract class AkkaHttpDownloader(protected val bookParser: Parser, protected va
   private def pathToUrl(toPath: String, fromUrl: URL): URL = {
     val protocol = fromUrl.getProtocol
     val host = fromUrl.getHost
-    val port = fromUrl.getPort
+    val portStr = if (fromUrl.getPort == -1 || fromUrl.getPort == 80) "" else s":${ fromUrl.getPort }"
     val fromPath = fromUrl.getPath
 
     if (toPath.startsWith("http")) new URL(toPath)
-    else if (toPath.startsWith("/")) new URL(s"$protocol://$host:$port$toPath")
-    else new URL(s"$protocol://$host:$port$fromPath/$toPath")
+    else if (toPath.startsWith("/")) new URL(s"$protocol://$host$portStr$toPath")
+    else new URL(s"$protocol://$host$portStr$fromPath/$toPath")
   }
 
   private def requestUrl(
@@ -145,11 +147,16 @@ abstract class AkkaHttpDownloader(protected val bookParser: Parser, protected va
     headers: List[HttpHeader] = List(),
     entity: RequestEntity = HttpEntity.Empty
   ): Future[HttpResponse] = {
+    var clientConnectionSettings =
+      ClientConnectionSettings(actorSystem.settings.config)
+        .withIdleTimeout(30 seconds)
+        .withConnectingTimeout(30 seconds)
+
     val connection =
       if (url.getProtocol == "https")
-        Http().outgoingConnectionHttps(url.getHost)
+        Http().outgoingConnectionHttps(url.getHost, 443, Http().defaultClientHttpsContext, None, clientConnectionSettings)
       else
-        Http().outgoingConnection(url.getHost)
+        Http().outgoingConnection(url.getHost, 80, None, clientConnectionSettings)
 
     val uriBuilder = new StringBuilder
     if (url.getPath == null || url.getPath == "")
@@ -161,10 +168,19 @@ abstract class AkkaHttpDownloader(protected val bookParser: Parser, protected va
 
     if (url.getQuery != null) uriBuilder.append("?" + url.getQuery)
 
-    val agent = RawHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36")
-    val defaultHeaders = if (headers.isEmpty) List(agent) else headers
+    val agent = `User-Agent`("Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36")
+    val accept = RawHeader("Accept", "*/*")
+    val defaultHeaders = if (headers.isEmpty) List(agent, accept) else headers
     val req = HttpRequest(method = method, uri = uriBuilder.toString, entity = entity, headers = defaultHeaders)
-    Source.single(req).via(connection).runWith(Sink.head).flatMap(processRedirect(_, method))
+    val responseFut = Source.single(req).via(connection).runWith(Sink.head)
+    responseFut.recoverWith {
+      case ex: Exception =>
+        Source.single(req).via(connection).runWith(Sink.head) // Retry 1
+    }.recover {
+      case ex: Exception =>
+        actorSystem.log.error(ex.getMessage())
+        HttpResponse(status = 404)
+    }.flatMap(processRedirect(_, method))
 
   }
 
