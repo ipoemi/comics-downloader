@@ -9,7 +9,7 @@ import akka.http.scaladsl.Http
 import akka.http.scaladsl.model._
 import akka.http.scaladsl.model.headers.{RawHeader, `User-Agent`}
 import akka.stream.ActorMaterializer
-import akka.stream.scaladsl.{Sink, Source}
+import akka.stream.scaladsl.{Flow, Sink, Source}
 import akka.util.ByteString
 import better.files._
 import ipoemi.comicsdownloader.parser.{Link, Parser}
@@ -71,11 +71,11 @@ abstract class AkkaHttpDownloader(protected val bookParser: Parser, protected va
         val ret = for {
           pages <- getPageLinks(book.uri, new URL(book.uri))
           newPages = pages.map(x => (x._1.copy(name = book.name + "/" + x._1.name), x._2))
-          _ <- Future { actorSystem.log.info(s"${ book.name } Start (${ newPages.size } pages)") }
+          _ <- Future {actorSystem.log.info(s"${book.name} Start (${newPages.size} pages)")}
           _ <- downloadPages(newPages)
-          _ <- zipPages(s"$to/${ book.name }", s"$to/${ book.name }.zip")
-          _ <- Future { actorSystem.log.info(s"$to/${ book.name }.zip Created") }
-          _ <- Future { s"$to/${ book.name }".toFile.delete() }
+          _ <- zipPages(s"$to/${book.name}", s"$to/${book.name}.zip")
+          _ <- Future {actorSystem.log.info(s"$to/${book.name}.zip Created")}
+          _ <- Future {s"$to/${book.name}".toFile.delete()}
         } yield book.name
         Await.result(ret, Duration.Inf)
         ret
@@ -95,7 +95,7 @@ abstract class AkkaHttpDownloader(protected val bookParser: Parser, protected va
           response <- requestUrl(pathToUrl(page.uri, fromUrl))
           filePath = to + "/" + page.name
           ret <- downloadTo(response, filePath)
-          _ <- Future { actorSystem.log.info(s"Download ${ pathToUrl(page.uri, fromUrl) } to $filePath Done") }
+          _ <- Future {actorSystem.log.info(s"Download ${pathToUrl(page.uri, fromUrl)} to $filePath Done")}
         } yield ret
       }
       result.toVector.sequence_
@@ -115,11 +115,19 @@ abstract class AkkaHttpDownloader(protected val bookParser: Parser, protected va
   } yield f(content)
 
   private def stringFromResponse(response: HttpResponse): Future[String] = {
-    response.entity.dataBytes.runFold("")(_ + _.decodeString("utf-8"))
+    response.entity.dataBytes.runFold("")(_ + _.decodeString("utf-8")).recover {
+      case ex: Exception =>
+        actorSystem.log.error(ex.getMessage)
+        ""
+    }
   }
 
   private def processResponse(response: HttpResponse)(f: ByteString => Unit): Future[Done] = {
-    response.entity.dataBytes.runForeach(f)
+    response.entity.dataBytes.runForeach(f).recover {
+      case ex: Exception =>
+        actorSystem.log.error(ex.getMessage)
+        Done
+    }
   }
 
   private def processRedirect(response: HttpResponse, httpMethod: HttpMethod): Future[HttpResponse] =
@@ -134,7 +142,7 @@ abstract class AkkaHttpDownloader(protected val bookParser: Parser, protected va
   private def pathToUrl(toPath: String, fromUrl: URL): URL = {
     val protocol = fromUrl.getProtocol
     val host = fromUrl.getHost
-    val portStr = if (fromUrl.getPort == -1 || fromUrl.getPort == 80) "" else s":${ fromUrl.getPort }"
+    val portStr = if (fromUrl.getPort == -1 || fromUrl.getPort == 80) "" else s":${fromUrl.getPort}"
     val fromPath = fromUrl.getPath
 
     if (toPath.startsWith("http")) new URL(toPath)
@@ -149,8 +157,8 @@ abstract class AkkaHttpDownloader(protected val bookParser: Parser, protected va
   ): Future[HttpResponse] = {
     var clientConnectionSettings =
       ClientConnectionSettings(actorSystem.settings.config)
-        .withIdleTimeout(30 seconds)
-        .withConnectingTimeout(30 seconds)
+        .withIdleTimeout(15 seconds)
+        .withConnectingTimeout(15 seconds)
 
     val connection =
       if (url.getProtocol == "https")
@@ -172,16 +180,24 @@ abstract class AkkaHttpDownloader(protected val bookParser: Parser, protected va
     val accept = RawHeader("Accept", "*/*")
     val defaultHeaders = if (headers.isEmpty) List(agent, accept) else headers
     val req = HttpRequest(method = method, uri = uriBuilder.toString, entity = entity, headers = defaultHeaders)
-    val responseFut = Source.single(req).via(connection).runWith(Sink.head)
-    responseFut.recoverWith {
-      case ex: Exception =>
-        Source.single(req).via(connection).runWith(Sink.head) // Retry 1
+    retry(req, connection, 5).flatMap(processRedirect(_, method))
+
+  }
+
+  private def retry(request: HttpRequest, connection: Flow[HttpRequest, HttpResponse, _], count: Int) = {
+    def responseFut = Source.single(request).via(connection).runWith(Sink.head)
+
+    (0 until count).foldLeft(responseFut) { (fut, _) =>
+      fut.recoverWith {
+        case ex: Exception =>
+          actorSystem.log.error(ex.getMessage)
+          responseFut
+      }
     }.recover {
       case ex: Exception =>
         actorSystem.log.error(ex.getMessage())
         HttpResponse(status = 404)
-    }.flatMap(processRedirect(_, method))
-
+    }
   }
 
 }

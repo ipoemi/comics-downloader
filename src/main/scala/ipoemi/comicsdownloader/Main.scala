@@ -12,13 +12,7 @@ import ipoemi.comicsdownloader.parser._
 import scala.concurrent.ExecutionContextExecutor
 
 object Main extends App {
-  val config: Config = ConfigFactory.load()
-    //.withValue("akka.loglevel", ConfigValueFactory.fromAnyRef("OFF"))
-    //.withValue("akka.stdout-loglevel", ConfigValueFactory.fromAnyRef("OFF"))
-    //.withValue("akka.http.host-connection-pool.client.parsing.illegal-header-warnings", ConfigValueFactory.fromAnyRef(false))
-    //.withValue("akka.http.host-connection-pool.max-connections", ConfigValueFactory.fromAnyRef("2"))
-    //.withValue("akka.http.host-connection-pool.max-open-requests", ConfigValueFactory.fromAnyRef("1024"))
-  implicit val actorSystem: ActorSystem = ActorSystem("myActorSystem", config)
+  implicit val actorSystem: ActorSystem = ActorSystem("myActorSystem")
   implicit val materializer: ActorMaterializer = ActorMaterializer()
   implicit val executionContext: ExecutionContextExecutor = actorSystem.dispatcher
 
